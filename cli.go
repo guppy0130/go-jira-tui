@@ -15,7 +15,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/evertras/bubble-table/table"
 	"github.com/guppy0130/j2m"
-	"github.com/knipferrc/teacup/statusbar"
+	"github.com/mistakenelf/teacup/statusbar"
 	"github.com/spf13/viper"
 )
 
@@ -69,14 +69,14 @@ type Config struct {
 }
 
 type model struct {
-	globalHeight int              // usable height
-	globalWidth  int              // usable width
-	viewState    string           // board, issue, sprint, etc.
-	table        table.Model      // some table that will get assigned
-	viewport     viewport.Model   // some issue content??
-	statusBar    statusbar.Bubble // statusbar
-	jiraData     jiraData         // jira data
-	breadcrumbs  []breadcrumb     // supports going back with esc
+	globalHeight int             // usable height
+	globalWidth  int             // usable width
+	viewState    string          // board, issue, sprint, etc.
+	table        table.Model     // some table that will get assigned
+	viewport     viewport.Model  // some issue content??
+	statusBar    statusbar.Model // statusbar
+	jiraData     jiraData        // jira data
+	breadcrumbs  []breadcrumb    // supports going back with esc
 }
 
 type updateViewState string
