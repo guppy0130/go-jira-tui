@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/andygrunwald/go-jira"
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
@@ -318,10 +319,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "q", "ctrl+c":
+		switch {
+		case key.Matches(msg, DefaultKeyMap.Quit):
 			return m, tea.Quit
-		case "enter":
+		case key.Matches(msg, DefaultKeyMap.Enter):
 			switch m.viewState {
 			case keywordBoards: // going to sprints
 				row := m.table.HighlightedRow()
@@ -353,7 +354,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			default:
 				panic(m.viewState)
 			}
-		case "esc":
+		case key.Matches(msg, DefaultKeyMap.Back):
 			// no breadcrumbs, nothing to esc here
 			if len(m.breadcrumbs) == 0 {
 				return m, nil
