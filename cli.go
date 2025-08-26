@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -58,6 +59,13 @@ type jiraData struct {
 type breadcrumb struct {
 	t     string // one of the keywords*
 	value string // value for lookup (id or key)
+}
+
+// Config for the app
+type Config struct {
+	Email string `mapstructurue:"email"` // your email to sign into atlassian
+	Token string `mapstructure:"token"`  // a token for basic auth (tested only with cloud)
+	Url   string `mapstructure:"url"`    // root URL; e.g., https://guppy0130.atlassian.net
 }
 
 type model struct {
@@ -420,20 +428,32 @@ func (m model) View() string {
 
 func main() {
 	// handle config
+	var config Config
 	viper.SetConfigName("config")
 	viper.SetConfigType("yaml")
+
+	if config_dir, err := os.UserConfigDir(); err != nil {
+		viper.AddConfigPath(filepath.Join(config_dir, "go-jira-tui"))
+	}
 	viper.AddConfigPath(".")
-	err := viper.ReadInConfig()
-	if err != nil {
-		panic(fmt.Errorf("fatal error config file: %w", err))
+
+	if err := viper.ReadInConfig(); err != nil {
+		panic(fmt.Errorf("no config file? %w", err))
+	}
+	err := viper.Unmarshal(&config)
+	if err != nil || config.Email == "" || config.Token == "" || config.Url == "" {
+		panic(fmt.Errorf("bad config file? %w", err))
+	}
+	if config.Email == "" || config.Token == "" || config.Url == "" {
+		panic(fmt.Errorf("part of config is empty: %+v", config))
 	}
 
 	// generate client
 	jiraAuthBasic := jira.BasicAuthTransport{
-		Username: viper.GetString("email"),
-		Password: viper.GetString("token"),
+		Username: config.Email,
+		Password: config.Token,
 	}
-	jiraClient, err := jira.NewClient(jiraAuthBasic.Client(), viper.GetString("atlassian_root"))
+	jiraClient, err := jira.NewClient(jiraAuthBasic.Client(), config.Url)
 	if err != nil {
 		panic(err)
 	}
