@@ -5,392 +5,158 @@ import (
 	"log/slog"
 	"os"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"codeberg.org/tslocum/cview"
+	gojira "github.com/andygrunwald/go-jira"
+	"github.com/gdamore/tcell/v2"
 	"github.com/guppy0130/go-jira-tui/internal/config"
 	"github.com/guppy0130/go-jira-tui/internal/jira"
-	"github.com/guppy0130/go-jira-tui/internal/model"
-	"github.com/guppy0130/go-jira-tui/pkg/cmd/logger"
+	"github.com/guppy0130/j2m"
 )
 
-const (
-	accentColor = lipgloss.Color("57")
-	// glamourTheme = "dark"
-)
+// generate the issue flex. return the number of items in the flex.
+func generateIssueFlex(issue gojira.Issue) (*cview.Flex, int) {
+	itemCounter := 0
+	// issue fields/text here vertically stacked I guess
+	issueFlex := cview.NewFlex()
+	issueFlex.SetDirection(cview.FlexRow)
 
-// 	columnKeyStartDate = "start_date" // sprint start date
-// 	columnKeyEndDate   = "end_date"   // sprint end date
-// 	columnKeyIssueKey  = "issue_key"  // issue key
-// 	columnKeySummary   = "summary"    // issue summary
-// 	columnKeyBack      = "back"       // some arbitrary int to go back to the higher level
+	// TODO: maybe glow to render here?
+	if description := j2m.JiraToMD(issue.Fields.Description); len(description) > 0 {
+		issueDescriptionText := cview.NewTextView()
+		issueDescriptionText.SetTitle("Description")
+		issueDescriptionText.SetBorder(true)
+		issueDescriptionText.SetText(description)
+		// default focus to the desc if it exists
+		issueFlex.AddItem(issueDescriptionText, 0, 1, true)
+		itemCounter += 1
+	}
 
-// 	keywordBoards  = "Boards"
-// 	keywordSprints = "Sprints"
-// 	keywordIssues  = "Issues"
+	if c := issue.Fields.Comments; c != nil && len(c.Comments) > 0 {
+		issueComments := cview.NewFlex()
+		issueComments.SetTitle("Comments")
+		issueComments.SetBorder(true)
+		issueComments.SetDirection(cview.FlexRow)
 
-// 	default_view = keywordBoards
-// )
+		slog.Debug("fetched comments", "comments", c)
+		// TODO: maybe this is a list of all the comments instead, or not individual
+		// text boxes
+		for _, comment := range c.Comments {
+			commentBox := cview.NewTextView()
+			commentBox.SetTitle(fmt.Sprintf("%s @ %s", comment.Author.DisplayName, comment.Updated))
+			commentBox.SetBorder(true)
+			commentBox.SetText(comment.Body)
+			issueComments.AddItem(commentBox, 0, 1, false)
+		}
+		issueFlex.AddItem(issueComments, 0, 1, false)
+		itemCounter += 1
+	}
 
-var (
-// border      = lipgloss.NewStyle().BorderStyle(lipgloss.RoundedBorder()).BorderForeground(accentColor)
-// lightBorder = lipgloss.NewStyle().BorderStyle(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("250"))
-)
+	issueFlex.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		switch event.Key() {
+		case tcell.KeyCancel:
+			// this is stupid. how do you pass this back to the app?
+			return nil
+		}
+		// probably hand it to the issueFlex for handling?
+		return event
+	})
 
-// // the breadcrumb describes how to get back/what path we've taken
-// type breadcrumb struct {
-// 	t     string // one of the keywords*
-// 	value string // value for lookup (id or key)
-// }
+	return issueFlex, itemCounter
+}
 
-// type updateViewState string
-// type updateViewport string
-// type updateTable table.Model
+func setupApp(jiraData jira.JiraData) *cview.Application {
+	app := cview.NewApplication()
+	flex := cview.NewFlex()
 
-// func tableGenerator(columns []table.Column, rows []table.Row) updateTable {
-// 	// the primary table
-// 	t := table.New(columns).
-// 		WithRows(rows).
-// 		Filtered(true).
-// 		Focused(true).
-// 		BorderRounded().
-// 		HighlightStyle(
-// 			lipgloss.NewStyle().Background(accentColor),
-// 		)
+	projectList := cview.NewList()
+	projectList.SetBorder(true)
+	projectList.SetTitle("Projects")
+	projectList.SetIndicators(">>", "", "", "")
 
-// 	return updateTable(t)
-// }
+	for _, project := range jiraData.GetProjects() {
+		li := cview.NewListItem(project.Name)
+		li.SetReference(project)
+		projectList.AddItem(li)
+	}
 
-// func updateStatusBar(state string) tea.Cmd {
-// 	return func() tea.Msg {
-// 		return updateViewState(state)
-// 	}
-// }
+	issueTable := cview.NewTable()
+	issueTable.SetBorder(true)
+	issueTable.SetTitle("Issues")
+	issueTable.SetSelectable(true, false)
 
-// func getBoards(jiraClient jira.Client) tea.Cmd {
-// 	return tea.Batch(
-// 		updateStatusBar(keywordBoards),
-// 		func() tea.Msg {
-// 			// get boards available to the user
-// 			boards, _, err := jiraClient.Board.GetAllBoards(&jira.BoardListOptions{})
-// 			if err != nil {
-// 				panic(err)
-// 			}
-// 			// table the boards
-// 			columns := []table.Column{
-// 				table.NewColumn(columnKeyID, "ID", 4),
-// 				table.NewFlexColumn(columnKeyName, "Name", 1).WithFiltered(true),
-// 			}
-// 			rows := []table.Row{}
-// 			for _, board := range boards.Values {
-// 				rows = append(rows, table.NewRow(
-// 					table.RowData{
-// 						columnKeyID:   board.ID,
-// 						columnKeyName: board.Name,
-// 					},
-// 				))
-// 			}
-// 			return tableGenerator(columns, rows)
-// 		},
-// 	)
-// }
+	projectList.SetSelectedFunc(func(i int, li *cview.ListItem) {
+		project := li.GetReference()
+		slog.Debug("selected project", "project", project)
 
-// func getActiveSprintsInBoard(jiraClient jira.Client, boardId int) tea.Cmd {
-// 	return tea.Batch(
-// 		updateStatusBar(keywordSprints),
-// 		func() tea.Msg {
-// 			sprints, _, err := jiraClient.Board.GetAllSprintsWithOptions(boardId, &jira.GetAllSprintsOptions{State: "active"})
-// 			if err != nil {
-// 				panic(err)
-// 			}
-// 			columns := []table.Column{
-// 				table.NewColumn(columnKeyID, "ID", 4),
-// 				table.NewFlexColumn(columnKeyName, "Name", 1).WithFiltered(true),
-// 				table.NewColumn(columnKeyStartDate, "Start Date", 30),
-// 				table.NewColumn(columnKeyEndDate, "End Date", 30),
-// 			}
-// 			rows := []table.Row{}
-// 			for _, sprint := range sprints.Values {
-// 				rows = append(rows, table.NewRow(
-// 					table.RowData{
-// 						columnKeyID:        sprint.ID,
-// 						columnKeyName:      sprint.Name,
-// 						columnKeyStartDate: sprint.StartDate.Local().Format(time.RFC1123),
-// 						columnKeyEndDate:   sprint.EndDate.Local().Format(time.RFC1123),
-// 						columnKeyBack:      sprint.OriginBoardID,
-// 					},
-// 				))
-// 			}
+		if project, ok := project.(gojira.Project); ok {
+			issueTable.Clear()
+			// update issues table
+			for idx, issue := range jiraData.GetIssuesForProject(project) {
+				tcKey := cview.NewTableCell(issue.Key)
+				tcKey.SetReference(issue)
+				tcSummary := cview.NewTableCell(issue.Fields.Summary)
 
-// 			return tableGenerator(columns, rows)
-// 		},
-// 	)
-// }
+				// TODO: maybe not hard code these positions?
+				issueTable.SetCell(idx, 0, tcKey)
+				issueTable.SetCell(idx, 1, tcSummary)
+			}
+			// since you've selected a project, shift focus to the issues
+			app.SetFocus(issueTable)
+		} else {
+			slog.Warn("selected project list item didn't have a ref to a project?")
+		}
+	})
 
-// func getIssuesInSprint(jiraClient jira.Client, sprintId int) tea.Cmd {
-// 	return tea.Batch(
-// 		updateStatusBar(keywordIssues),
-// 		func() tea.Msg {
-// 			issues, _, err := jiraClient.Sprint.GetIssuesForSprint(sprintId)
-// 			if err != nil {
-// 				panic(err)
-// 			}
-// 			columns := []table.Column{
-// 				// table.NewColumn(columnKeyID, "ID", 4),
-// 				table.NewColumn(columnKeyIssueKey, "Key", 16).WithFiltered(true),
-// 				table.NewFlexColumn(columnKeySummary, "Summary", 1).WithFiltered(true),
-// 			}
-// 			rows := []table.Row{}
-// 			for _, issue := range issues {
-// 				rows = append(rows, table.NewRow(
-// 					table.RowData{
-// 						columnKeyID:       issue.ID,
-// 						columnKeyIssueKey: issue.Key,
-// 						columnKeySummary:  issue.Fields.Summary,
-// 						columnKeyBack:     issue.Fields.Sprint.ID,
-// 					},
-// 				))
-// 			}
-// 			return tableGenerator(columns, rows)
-// 		},
-// 	)
-// }
+	// a dummy value; we need to track the last issueFlex we created because we
+	// need to remove it when we re-draw the issue
+	lastIssueFlex := cview.NewFlex()
+	issueTable.SetSelectedFunc(func(row, column int) {
+		// fetch the ref
+		issue := issueTable.GetCell(row, 0).GetReference()
 
-// /*
-//  * summary
-//  * desc       | assignee
-//  * comments?  | reporter
-//  */
+		// type checker could be a little more sane here
+		if issue, ok := issue.(gojira.Issue); ok {
+			// resolve issue to more data, then generate issueFlex from more data
+			issueFlex, issueFlexItemCounter := generateIssueFlex(jiraData.GetIssue(issue))
 
-// func renderGlamourJira(jiraContent string) string {
-// 	content, err := glamour.Render(j2m.JiraToMD(jiraContent), glamourTheme)
-// 	if err != nil {
-// 		panic(err)
-// 	}
-// 	return content
-// }
+			// remove the last issueFlex if it's present? this won't explode if it's
+			// already removed, so this should be fine to do
+			flex.RemoveItem(lastIssueFlex)
 
-// func getIssue(jiraClient jira.Client, issueId string, issueKey string) tea.Cmd {
-// 	// serialize the issue into glamour
-// 	return tea.Batch(
-// 		updateStatusBar(issueKey),
-// 		func() tea.Msg {
-// 			issue, _, err := jiraClient.Issue.Get(issueId, nil)
-// 			if err != nil {
-// 				panic(err)
-// 			}
-// 			// handle rendering the summary
-// 			summary, err := glamour.Render(fmt.Sprintf("# %s", issue.Fields.Summary), glamourTheme)
-// 			if err != nil {
-// 				summary = issue.Fields.Summary
-// 			}
+			// if there's actually issue content to display, display it
+			if issueFlexItemCounter > 0 {
+				flex.AddItem(issueFlex, 0, 2, false)
 
-// 			// left half is
-// 			// description and comments
-// 			description := renderGlamourJira(issue.Fields.Description)
+				// since you've selected an issue, move focus
+				app.SetFocus(issueFlex)
+				// update lastIssueFlex to hold a ref; we'll need to clear it next time we
+				// re-draw, because we don't have access to the flex's items.
+				lastIssueFlex = issueFlex
+			}
+		} else {
+			slog.Warn("selected cell didn't have a ref to an issue?")
+			return
+		}
+	})
 
-// 			comments := strings.Builder{}
-// 			for _, comment := range issue.Fields.Comments.Comments {
-// 				s := strings.Builder{}
-// 				// handle author rendering
-// 				s.WriteString(fmt.Sprintf("%s, at %s", comment.Author.DisplayName, comment.Created))
-// 				// and if there's an update, indicate changes
-// 				if comment.Created != comment.Updated {
-// 					s.WriteString(fmt.Sprintf("\n(Last updated by %s at %s)", comment.UpdateAuthor.DisplayName, comment.Updated))
-// 				}
-// 				// write the body of the comment
-// 				s.WriteString("\n")
-// 				s.WriteString(renderGlamourJira(comment.Body))
-// 				comments.WriteString(lightBorder.Render(s.String()))
-// 				comments.WriteString("\n")
-// 			}
-// 			comment_header, err := glamour.Render("## Comments", glamourTheme)
-// 			if err != nil {
-// 				comment_header = "Comments"
-// 			}
-// 			left_half := lipgloss.JoinVertical(
-// 				lipgloss.Top,
-// 				border.Render(description),
-// 				border.Render(fmt.Sprintf("%s%s", comment_header, comments.String())),
-// 			)
+	flex.AddItem(projectList, 0, 1, false)
+	flex.AddItem(issueTable, 0, 1, false)
 
-// 			// right half is
-// 			// author, assignee
-// 			rhs_content := strings.Builder{}
-// 			details_header, err := glamour.Render("## Details", glamourTheme)
-// 			if err != nil {
-// 				details_header = "Details"
-// 			}
-// 			rhs_content.WriteString(details_header)
-// 			rhs_content.WriteString(fmt.Sprintf("Assignee: %s", issue.Fields.Assignee.DisplayName))
-// 			rhs_content.WriteString("\n")
-// 			rhs_content.WriteString(fmt.Sprintf("Reporter: %s", issue.Fields.Reporter.DisplayName))
-// 			right_half := lipgloss.JoinVertical(
-// 				lipgloss.Top,
-// 				border.Render(rhs_content.String()),
-// 			)
+	// the frame has a footer telling us who we are and what instance we're
+	// operating on
+	frame := cview.NewFrame(flex)
+	frame.AddText(
+		fmt.Sprintf("%s @ %s", jiraData.User.DisplayName, jiraData.Client.GetBaseURL().Host),
+		false,
+		cview.AlignRight,
+		cview.Styles.ContrastSecondaryTextColor,
+	)
 
-// 			// render the left and right halves
-// 			content := lipgloss.JoinHorizontal(lipgloss.Top, left_half, right_half)
-// 			// add the summary to the top
-// 			content = lipgloss.JoinVertical(lipgloss.Top, summary, content)
-// 			return updateViewport(content)
-// 		},
-// 	)
-// }
+	app.SetRoot(frame, true)
+	app.SetFocus(projectList)
 
-// func (m model) Init() tea.Cmd {
-// 	return getBoards(m.jiraData.client)
-// }
-
-// func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-// 	var (
-// 		cmd  tea.Cmd
-// 		cmds = []tea.Cmd{}
-// 	)
-
-// 	slog.Debug("update fx called", "msg", msg)
-// 	m.table, cmd = m.table.Update(msg)
-// 	cmds = append(cmds, cmd)
-
-// 	switch msg := msg.(type) {
-// 	case updateTable:
-// 		m.table = table.Model(msg)
-// 		m.table = m.table.WithTargetWidth(m.statusBar.Width)
-
-// 	case updateViewState:
-// 		m.viewState = string(msg)
-// 		serializedBreadcrumbs := []string{}
-// 		for _, breadcrumb := range m.breadcrumbs {
-// 			serializedBreadcrumbs = append(serializedBreadcrumbs, fmt.Sprintf("%s (%s)", breadcrumb.value, breadcrumb.t))
-// 		}
-// 		m.statusBar.SetContent(
-// 			m.viewState,
-// 			strings.Join(serializedBreadcrumbs, " > "),
-// 			m.jiraData.user.DisplayName,
-// 			m.jiraData.client.GetBaseURL().Host,
-// 		)
-
-// 	case updateViewport:
-// 		m.viewport = viewport.New(m.globalWidth, m.globalHeight)
-// 		content := string(msg)
-// 		m.viewport.SetContent(content)
-
-// 	case tea.WindowSizeMsg:
-// 		m.globalHeight = msg.Height
-// 		m.statusBar.SetSize(msg.Width)
-// 		m.table = m.table.WithTargetWidth(msg.Width)
-// 		return m, nil
-
-// 	case tea.KeyMsg:
-// 		switch {
-
-// 		case key.Matches(msg, keymap.DefaultKeyMap.Quit):
-// 			return m, tea.Quit
-
-// 		case key.Matches(msg, keymap.DefaultKeyMap.Enter):
-// 			switch m.viewState {
-// 			case keywordBoards: // going to sprints
-// 				row := m.table.HighlightedRow()
-// 				if row.Data != nil {
-// 					m.breadcrumbs = append(m.breadcrumbs, breadcrumb{
-// 						t:     keywordBoards,
-// 						value: fmt.Sprint(row.Data[columnKeyID].(int)),
-// 					})
-// 					return m, getActiveSprintsInBoard(m.jiraData.client, row.Data[columnKeyID].(int))
-// 				}
-// 			case keywordSprints: // going to issues
-// 				row := m.table.HighlightedRow()
-// 				if row.Data != nil {
-// 					m.breadcrumbs = append(m.breadcrumbs, breadcrumb{
-// 						t:     keywordSprints,
-// 						value: fmt.Sprint(row.Data[columnKeyID].(int)),
-// 					})
-// 					return m, getIssuesInSprint(m.jiraData.client, row.Data[columnKeyID].(int))
-// 				}
-// 			case keywordIssues: // reading a single issue
-// 				row := m.table.HighlightedRow()
-// 				if row.Data != nil {
-// 					m.breadcrumbs = append(m.breadcrumbs, breadcrumb{
-// 						t:     keywordIssues,
-// 						value: fmt.Sprint(row.Data[columnKeyID]),
-// 					})
-// 					return m, getIssue(m.jiraData.client, row.Data[columnKeyID].(string), row.Data[columnKeyIssueKey].(string))
-// 				}
-// 			default:
-// 				panic(m.viewState)
-// 			}
-// 		case key.Matches(msg, keymap.DefaultKeyMap.Back):
-// 			// no breadcrumbs, nothing to esc here
-// 			if len(m.breadcrumbs) == 0 {
-// 				return m, nil
-// 			}
-// 			// going back. pop the last, because it's where we're at
-// 			m.breadcrumbs = m.breadcrumbs[:len(m.breadcrumbs)-1]
-// 			// if we have nothing left, we should render all boards
-// 			if len(m.breadcrumbs) == 0 {
-// 				return m, getBoards(m.jiraData.client)
-// 			}
-// 			// otherwise, we can go back some more. what's the new last value?
-// 			last := m.breadcrumbs[len(m.breadcrumbs)-1]
-// 			switch last.t {
-// 			case keywordIssues:
-// 				return m, getIssue(m.jiraData.client, last.value, last.value)
-// 			case keywordSprints:
-// 				i, err := strconv.Atoi(last.value)
-// 				if err != nil {
-// 					panic(err)
-// 				}
-// 				return m, getIssuesInSprint(m.jiraData.client, i)
-// 			case keywordBoards:
-// 				i, err := strconv.Atoi(last.value)
-// 				if err != nil {
-// 					panic(err)
-// 				}
-// 				return m, getActiveSprintsInBoard(m.jiraData.client, i)
-// 			}
-// 		}
-// 	default:
-// 		tea.Println(msg)
-// 	}
-
-// 	// likely to always have updates
-// 	m.statusBar, cmd = m.statusBar.Update(msg)
-// 	cmds = append(cmds, cmd)
-// 	m.viewport, cmd = m.viewport.Update(msg)
-// 	cmds = append(cmds, cmd)
-
-// 	return m, tea.Batch(cmds...)
-// }
-
-// func (m model) View() string {
-// 	strings := []string{
-// 		m.viewState,
-// 	}
-
-// 	// body is either a viewport of issue stuff or a table
-// 	body := ""
-// 	switch m.viewState {
-// 	case keywordBoards, keywordSprints, keywordIssues:
-// 		body = m.table.View()
-// 	default:
-// 		body = m.viewport.View()
-// 	}
-// 	// render the body
-// 	strings = append(
-// 		strings,
-// 		lipgloss.NewStyle().
-// 			Height(m.globalHeight-statusbar.Height).
-// 			MaxHeight(m.globalHeight-m.statusBar.Height).
-// 			Render(body),
-// 	)
-// 	// and then the status bar goes at the bottom
-// 	strings = append(strings, m.statusBar.View())
-
-// 	return lipgloss.JoinVertical(
-// 		lipgloss.Top,
-// 		strings...,
-// 	)
-// }
+	return app
+}
 
 func main() {
 	// handle config
@@ -399,19 +165,17 @@ func main() {
 	// generate client
 	jiraData := jira.NewJiraData(config.Email, config.Token, config.Url)
 
-	// create the bubble tea model
-	m := model.NewModel(jiraData, config.AccentColor)
-
 	// setup logging
-	f, err := tea.LogToFileWith("go-jira-tui.debug.log", "prefix", logger.NewStructuredBubbleTeaLogger(config.LogFormat))
+	f, err := os.OpenFile("go-jira-tui.debug.log", os.O_WRONLY|os.O_TRUNC|os.O_CREATE|os.O_APPEND, 0644)
 	if err != nil {
 		panic(err)
 	}
 	defer f.Close()
-	slog.Debug("started logger")
-	// run the UI
-	if _, err := tea.NewProgram(m, tea.WithAltScreen()).Run(); err != nil {
-		fmt.Println("Error running program:", err)
-		os.Exit(1)
+	slog.SetDefault(slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{AddSource: true, Level: slog.LevelDebug})))
+
+	// setup + run app
+	app := setupApp(jiraData)
+	if err := app.Run(); err != nil {
+		panic(err)
 	}
 }
