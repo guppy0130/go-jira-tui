@@ -1,50 +1,111 @@
 package jira
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 
-	"github.com/andygrunwald/go-jira"
+	jira "github.com/andygrunwald/go-jira/v2/cloud"
 )
 
 // container for client + user
 type JiraData struct {
-	client jira.Client
-	user   *jira.User
+	client *jira.Client
+	User   *jira.User
+	URL    string
 }
 
 // get a client + user object
 func NewJiraData(email string, token string, url string) JiraData {
 	jiraAuthBasic := jira.BasicAuthTransport{
 		Username: email,
-		Password: token,
+		APIToken: token,
 	}
-	jiraClient, err := jira.NewClient(jiraAuthBasic.Client(), url)
+	jiraClient, err := jira.NewClient(url, jiraAuthBasic.Client())
 	if err != nil {
 		panic(err)
 	}
-	jiraUser, _, err := jiraClient.User.GetSelf()
+	jiraUser, _, err := jiraClient.User.GetCurrentUser(context.TODO())
 	if err != nil {
 		panic(err)
 	}
-
-	return JiraData{client: *jiraClient, user: jiraUser}
+	return JiraData{client: jiraClient, User: jiraUser, URL: url}
 }
 
-// list of all the boards
-func (j JiraData) GetBoards() *jira.BoardsList {
-	boards, _, err := j.client.Board.GetAllBoards(&jira.BoardListOptions{})
+// list of all the projects
+func (j JiraData) GetProjects() []jira.Project {
+	projectEntries, _, err := j.client.Project.GetAll(context.TODO(), &jira.GetQueryOptions{})
 	if err != nil {
 		panic(err)
 	}
-	return boards
+
+	projects := make([]jira.Project, 0)
+	for _, projectEntry := range *projectEntries {
+		proj, _, err := j.client.Project.Get(context.TODO(), projectEntry.ID)
+		if err != nil {
+			slog.Error("failed to fetch project", "project ID", projectEntry.ID, "error", err)
+			continue
+		}
+		projects = append(projects, *proj)
+	}
+
+	return projects
 }
 
-// issues in a particular board
-func (j JiraData) GetIssuesForBoard(board jira.Board) []jira.Issue {
-	issues, _, err := j.client.Issue.Search(fmt.Sprintf("project = %s", board.Name), &jira.SearchOptions{})
+// issues in a particular project
+func (j JiraData) GetIssuesForProject(project jira.Project) []jira.Issue {
+	jql := fmt.Sprintf("project = %s", project.Key)
+	slog.Debug("fetching issues", "JQL", jql)
+	issues, _, err := j.client.Issue.Search(
+		context.TODO(),
+		jql,
+		// cannot request `*all` fields; see
+		// https://github.com/andygrunwald/go-jira/issues/715#issuecomment-3255139149
+		// this MUST be kept in sync with internal/jira/issue.go
+		&jira.SearchOptions{
+			Fields: []string{
+				"key",
+				"summary",
+				"status",
+				"assignee",
+				"created",
+				"updated",
+			},
+		},
+	)
+
 	if err != nil {
+		slog.Error("failed to get issues for project", "project", project.Key, "error", err)
 		panic(err)
 	}
 
+	slog.Debug("got issues", "issues", issues)
 	return issues
+}
+
+func (j JiraData) GetIssue(issue jira.Issue) jira.Issue {
+	i, _, err := j.client.Issue.Get(
+		context.TODO(),
+		issue.ID,
+		&jira.GetQueryOptions{
+			FieldsByKeys: true,
+			Expand:       "transitions,changelog",
+		},
+	)
+	if err != nil {
+		slog.Error("failed to get issue", "issue", issue)
+		panic(err)
+	}
+	return *i
+}
+
+func (j JiraData) TransitionIssue(issue jira.Issue, toState jira.Transition) error {
+	_, err := j.client.Issue.DoTransition(
+		context.TODO(), issue.ID, toState.ID,
+	)
+	if err != nil {
+		slog.Error("failed to transition issue", "issue", issue, "toState", toState)
+		return err
+	}
+	return nil
 }

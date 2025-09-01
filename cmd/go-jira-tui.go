@@ -1,396 +1,307 @@
 package main
 
 import (
+	"cmp"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
+	"runtime/debug"
+	"slices"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	gojira "github.com/andygrunwald/go-jira/v2/cloud"
+	"github.com/charmbracelet/glamour"
+	"github.com/gdamore/tcell/v2"
 	"github.com/guppy0130/go-jira-tui/internal/config"
 	"github.com/guppy0130/go-jira-tui/internal/jira"
-	"github.com/guppy0130/go-jira-tui/internal/model"
-	"github.com/guppy0130/go-jira-tui/pkg/cmd/logger"
+	"github.com/guppy0130/j2m"
+	"github.com/rivo/tview"
 )
 
 const (
-	accentColor = lipgloss.Color("57")
-	// glamourTheme = "dark"
+	PageProject     = "Projects"
+	PageIssues      = "Issues"
+	PageSingleIssue = "Single Issue"
 )
 
-// 	columnKeyStartDate = "start_date" // sprint start date
-// 	columnKeyEndDate   = "end_date"   // sprint end date
-// 	columnKeyIssueKey  = "issue_key"  // issue key
-// 	columnKeySummary   = "summary"    // issue summary
-// 	columnKeyBack      = "back"       // some arbitrary int to go back to the higher level
+func linkify(url, text string) string {
+	return fmt.Sprintf("[::u:%s]%s[::-:-]", url, text)
+}
 
-// 	keywordBoards  = "Boards"
-// 	keywordSprints = "Sprints"
-// 	keywordIssues  = "Issues"
+// generate a TextView with given title + text. borders automatically enabled
+// (to render title).
+func newTextView(title string, text string) *tview.TextView {
+	textView := tview.NewTextView()
+	textView.SetText(text)
+	textView.SetTitle(title)
+	textView.SetBorder(true)
+	return textView
+}
 
-// 	default_view = keywordBoards
-// )
+// generate the issue flex.
+func generateIssueFlex(issue gojira.Issue, jiraData jira.JiraData) *tview.Flex {
+	rootFlex := tview.NewFlex()
+	rootFlex.SetTitle(fmt.Sprintf("Issue %s", issue.Key))
+	rootFlex.SetBorder(true)
 
-var (
-// border      = lipgloss.NewStyle().BorderStyle(lipgloss.RoundedBorder()).BorderForeground(accentColor)
-// lightBorder = lipgloss.NewStyle().BorderStyle(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("250"))
-)
+	// issue description and comments
+	descAndCommentsFlex := tview.NewFlex()
+	descAndCommentsFlex.SetDirection(tview.FlexRow)
 
-// // the breadcrumb describes how to get back/what path we've taken
-// type breadcrumb struct {
-// 	t     string // one of the keywords*
-// 	value string // value for lookup (id or key)
-// }
+	if description := j2m.JiraToMD(issue.Fields.Description); len(description) > 0 {
+		issueDescriptionText := tview.NewTextView()
+		issueDescriptionText.SetTitle("Description")
+		issueDescriptionText.SetBorder(true)
 
-// type updateViewState string
-// type updateViewport string
-// type updateTable table.Model
+		// if we *can* augment it with glamour let's do so
+		if renderedDesc, err := glamour.Render(description, "dark"); err == nil {
+			description = tview.TranslateANSI(renderedDesc)
+			issueDescriptionText.SetDynamicColors(true)
+		} else {
+			slog.Error("failed to glamour description", "issue", issue.Key, "description", description, "error", err)
+		}
+		issueDescriptionText.SetText(description)
+		descAndCommentsFlex.AddItem(issueDescriptionText, 0, 1, true)
+		// TODO: shell out to editor to edit this maybe?
+	}
 
-// func tableGenerator(columns []table.Column, rows []table.Row) updateTable {
-// 	// the primary table
-// 	t := table.New(columns).
-// 		WithRows(rows).
-// 		Filtered(true).
-// 		Focused(true).
-// 		BorderRounded().
-// 		HighlightStyle(
-// 			lipgloss.NewStyle().Background(accentColor),
-// 		)
+	// if there's comments to render, we'll go ahead and show them in a list, but
+	// without shortcuts (no guarantee we have < len(runes) # of comments?)
+	if c := issue.Fields.Comments; c != nil && len(c.Comments) > 0 {
+		issueList := tview.NewList()
+		// for some reason they don't support vim keybinds here?
+		// TODO: handle `gg` to go to top (requires storing prev key(s))
+		issueList.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+			switch event.Rune() {
+			case 'j':
+				issueList.SetCurrentItem(issueList.GetCurrentItem() + 1)
+				return nil
+			case 'k':
+				issueList.SetCurrentItem(issueList.GetCurrentItem() - 1)
+				return nil
+			case 'G':
+				issueList.SetCurrentItem(-1)
+				return nil
+			}
 
-// 	return updateTable(t)
-// }
+			return event
+		})
 
-// func updateStatusBar(state string) tea.Cmd {
-// 	return func() tea.Msg {
-// 		return updateViewState(state)
-// 	}
-// }
+		issueList.SetTitle("Comments")
+		issueList.SetBorder(true)
 
-// func getBoards(jiraClient jira.Client) tea.Cmd {
-// 	return tea.Batch(
-// 		updateStatusBar(keywordBoards),
-// 		func() tea.Msg {
-// 			// get boards available to the user
-// 			boards, _, err := jiraClient.Board.GetAllBoards(&jira.BoardListOptions{})
-// 			if err != nil {
-// 				panic(err)
-// 			}
-// 			// table the boards
-// 			columns := []table.Column{
-// 				table.NewColumn(columnKeyID, "ID", 4),
-// 				table.NewFlexColumn(columnKeyName, "Name", 1).WithFiltered(true),
-// 			}
-// 			rows := []table.Row{}
-// 			for _, board := range boards.Values {
-// 				rows = append(rows, table.NewRow(
-// 					table.RowData{
-// 						columnKeyID:   board.ID,
-// 						columnKeyName: board.Name,
-// 					},
-// 				))
-// 			}
-// 			return tableGenerator(columns, rows)
-// 		},
-// 	)
-// }
+		for _, comment := range c.Comments {
+			issueList.AddItem(
+				comment.Body,
+				fmt.Sprintf("%s @ %s", comment.Author.DisplayName, comment.Updated),
+				0, // set to 0 for no binding
+				nil,
+			)
+		}
+		descAndCommentsFlex.AddItem(issueList, 0, 1, false)
+	}
 
-// func getActiveSprintsInBoard(jiraClient jira.Client, boardId int) tea.Cmd {
-// 	return tea.Batch(
-// 		updateStatusBar(keywordSprints),
-// 		func() tea.Msg {
-// 			sprints, _, err := jiraClient.Board.GetAllSprintsWithOptions(boardId, &jira.GetAllSprintsOptions{State: "active"})
-// 			if err != nil {
-// 				panic(err)
-// 			}
-// 			columns := []table.Column{
-// 				table.NewColumn(columnKeyID, "ID", 4),
-// 				table.NewFlexColumn(columnKeyName, "Name", 1).WithFiltered(true),
-// 				table.NewColumn(columnKeyStartDate, "Start Date", 30),
-// 				table.NewColumn(columnKeyEndDate, "End Date", 30),
-// 			}
-// 			rows := []table.Row{}
-// 			for _, sprint := range sprints.Values {
-// 				rows = append(rows, table.NewRow(
-// 					table.RowData{
-// 						columnKeyID:        sprint.ID,
-// 						columnKeyName:      sprint.Name,
-// 						columnKeyStartDate: sprint.StartDate.Local().Format(time.RFC1123),
-// 						columnKeyEndDate:   sprint.EndDate.Local().Format(time.RFC1123),
-// 						columnKeyBack:      sprint.OriginBoardID,
-// 					},
-// 				))
-// 			}
+	rootFlex.AddItem(descAndCommentsFlex, 0, 2, true)
 
-// 			return tableGenerator(columns, rows)
-// 		},
-// 	)
-// }
+	// state/assignee/other details
+	detailsFlex := tview.NewFlex()
+	detailsFlex.SetTitle("Details")
+	detailsFlex.SetBorder(true)
+	detailsFlex.SetDirection(tview.FlexRow)
 
-// func getIssuesInSprint(jiraClient jira.Client, sprintId int) tea.Cmd {
-// 	return tea.Batch(
-// 		updateStatusBar(keywordIssues),
-// 		func() tea.Msg {
-// 			issues, _, err := jiraClient.Sprint.GetIssuesForSprint(sprintId)
-// 			if err != nil {
-// 				panic(err)
-// 			}
-// 			columns := []table.Column{
-// 				// table.NewColumn(columnKeyID, "ID", 4),
-// 				table.NewColumn(columnKeyIssueKey, "Key", 16).WithFiltered(true),
-// 				table.NewFlexColumn(columnKeySummary, "Summary", 1).WithFiltered(true),
-// 			}
-// 			rows := []table.Row{}
-// 			for _, issue := range issues {
-// 				rows = append(rows, table.NewRow(
-// 					table.RowData{
-// 						columnKeyID:       issue.ID,
-// 						columnKeyIssueKey: issue.Key,
-// 						columnKeySummary:  issue.Fields.Summary,
-// 						columnKeyBack:     issue.Fields.Sprint.ID,
-// 					},
-// 				))
-// 			}
-// 			return tableGenerator(columns, rows)
-// 		},
-// 	)
-// }
+	// in progress, done, cancelled, etc.
+	statusDropDown := tview.NewDropDown()
+	statusDropDown.SetLabel("Status")
+	// TODO: use RuneCountInString or GraphemeCountInString instead of `len`
+	statusDropDown.SetLabelWidth(len(statusDropDown.GetLabel()) + 1)
+	slices.SortFunc(issue.Transitions, func(a, b gojira.Transition) int {
+		return cmp.Compare(a.ID, b.ID)
+	})
+	for idx, transition := range issue.Transitions {
+		slog.Debug("adding issue transition", "transition", transition, "issue", issue)
+		statusDropDown.AddOption(transition.To.Name, func() {
+			// TODO: figure out if we should just send a message to the caller
+			jiraData.TransitionIssue(issue, transition)
+			// they might use some stupid names like `blue-gray` which we don't
+			// understand, but `GetColor` will return the default color in that case
+			// which should be ok?
+			statusDropDown.SetFieldBackgroundColor(
+				tcell.GetColor(transition.To.StatusCategory.ColorName),
+			)
+		})
+		// we're in the transition that we're adding, so update the field
+		if transition.To.ID == issue.Fields.Status.ID {
+			statusDropDown.SetCurrentOption(idx)
+			statusDropDown.SetFieldBackgroundColor(
+				tcell.GetColor(transition.To.StatusCategory.ColorName),
+			)
+		}
+	}
 
-// /*
-//  * summary
-//  * desc       | assignee
-//  * comments?  | reporter
-//  */
+	// statusText := newTextView("Status", issue.Fields.Status.Name)
+	detailsFlex.AddItem(statusDropDown, 3, 0, false)
 
-// func renderGlamourJira(jiraContent string) string {
-// 	content, err := glamour.Render(j2m.JiraToMD(jiraContent), glamourTheme)
-// 	if err != nil {
-// 		panic(err)
-// 	}
-// 	return content
-// }
+	// reporter + assignee if assigned
+	reporterAssigneeFlex := tview.NewFlex()
+	// TODO: find a case where reporter is empty (then who filed the ticket?)
+	reporterText := newTextView("Reporter", issue.Fields.Reporter.DisplayName)
+	reporterAssigneeFlex.AddItem(reporterText, 0, 1, false)
 
-// func getIssue(jiraClient jira.Client, issueId string, issueKey string) tea.Cmd {
-// 	// serialize the issue into glamour
-// 	return tea.Batch(
-// 		updateStatusBar(issueKey),
-// 		func() tea.Msg {
-// 			issue, _, err := jiraClient.Issue.Get(issueId, nil)
-// 			if err != nil {
-// 				panic(err)
-// 			}
-// 			// handle rendering the summary
-// 			summary, err := glamour.Render(fmt.Sprintf("# %s", issue.Fields.Summary), glamourTheme)
-// 			if err != nil {
-// 				summary = issue.Fields.Summary
-// 			}
+	var assigneeText *tview.TextView
+	if issue.Fields.Assignee != nil {
+		assigneeText = newTextView("Assignee", issue.Fields.Assignee.DisplayName)
+	} else {
+		assigneeText = newTextView("Assignee", "unassigned")
+	}
+	reporterAssigneeFlex.AddItem(assigneeText, 0, 1, false)
+	detailsFlex.AddItem(reporterAssigneeFlex, 3, 0, false)
 
-// 			// left half is
-// 			// description and comments
-// 			description := renderGlamourJira(issue.Fields.Description)
+	// created/updated
+	createdUpdatedFlex := tview.NewFlex()
+	createdUpdatedFlex.SetDirection(tview.FlexColumn)
+	if createdBytes, err := issue.Fields.Created.MarshalJSON(); err == nil {
+		createdUpdatedFlex.AddItem(
+			newTextView("Created", string(createdBytes)[1:len(createdBytes)-1]), 0, 1, false,
+		)
+	}
+	if updatedBytes, err := issue.Fields.Updated.MarshalJSON(); err == nil {
+		createdUpdatedFlex.AddItem(
+			newTextView("Updated", string(updatedBytes)[1:len(updatedBytes)-1]), 0, 1, false,
+		)
+	}
+	detailsFlex.AddItem(createdUpdatedFlex, 3, 0, false)
 
-// 			comments := strings.Builder{}
-// 			for _, comment := range issue.Fields.Comments.Comments {
-// 				s := strings.Builder{}
-// 				// handle author rendering
-// 				s.WriteString(fmt.Sprintf("%s, at %s", comment.Author.DisplayName, comment.Created))
-// 				// and if there's an update, indicate changes
-// 				if comment.Created != comment.Updated {
-// 					s.WriteString(fmt.Sprintf("\n(Last updated by %s at %s)", comment.UpdateAuthor.DisplayName, comment.Updated))
-// 				}
-// 				// write the body of the comment
-// 				s.WriteString("\n")
-// 				s.WriteString(renderGlamourJira(comment.Body))
-// 				comments.WriteString(lightBorder.Render(s.String()))
-// 				comments.WriteString("\n")
-// 			}
-// 			comment_header, err := glamour.Render("## Comments", glamourTheme)
-// 			if err != nil {
-// 				comment_header = "Comments"
-// 			}
-// 			left_half := lipgloss.JoinVertical(
-// 				lipgloss.Top,
-// 				border.Render(description),
-// 				border.Render(fmt.Sprintf("%s%s", comment_header, comments.String())),
-// 			)
+	// issue url for browser
+	if u, err := url.JoinPath(jiraData.URL, "/browse/"); err == nil {
+		if u2, err := url.JoinPath(u, issue.Key); err == nil {
+			urlTextView := newTextView("Issue URL", linkify(u2, u2))
+			urlTextView.SetDynamicColors(true)
+			detailsFlex.AddItem(urlTextView, 3, 0, false)
+		}
+		if issue.Fields.Parent != nil {
+			if u2, err := url.JoinPath(u, issue.Fields.Parent.Key); err == nil {
+				urlTextView := newTextView("Parent URL", linkify(u2, u2))
+				urlTextView.SetDynamicColors(true)
+				detailsFlex.AddItem(urlTextView, 3, 0, false)
+			}
+		}
+	}
 
-// 			// right half is
-// 			// author, assignee
-// 			rhs_content := strings.Builder{}
-// 			details_header, err := glamour.Render("## Details", glamourTheme)
-// 			if err != nil {
-// 				details_header = "Details"
-// 			}
-// 			rhs_content.WriteString(details_header)
-// 			rhs_content.WriteString(fmt.Sprintf("Assignee: %s", issue.Fields.Assignee.DisplayName))
-// 			rhs_content.WriteString("\n")
-// 			rhs_content.WriteString(fmt.Sprintf("Reporter: %s", issue.Fields.Reporter.DisplayName))
-// 			right_half := lipgloss.JoinVertical(
-// 				lipgloss.Top,
-// 				border.Render(rhs_content.String()),
-// 			)
+	rootFlex.AddItem(detailsFlex, 0, 1, false)
 
-// 			// render the left and right halves
-// 			content := lipgloss.JoinHorizontal(lipgloss.Top, left_half, right_half)
-// 			// add the summary to the top
-// 			content = lipgloss.JoinVertical(lipgloss.Top, summary, content)
-// 			return updateViewport(content)
-// 		},
-// 	)
-// }
+	return rootFlex
+}
 
-// func (m model) Init() tea.Cmd {
-// 	return getBoards(m.jiraData.client)
-// }
+func setupApp(jiraData jira.JiraData) *tview.Application {
+	app := tview.NewApplication()
 
-// func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-// 	var (
-// 		cmd  tea.Cmd
-// 		cmds = []tea.Cmd{}
-// 	)
+	// there are three pages
+	pages := tview.NewPages()
 
-// 	slog.Debug("update fx called", "msg", msg)
-// 	m.table, cmd = m.table.Update(msg)
-// 	cmds = append(cmds, cmd)
+	// the project table has the list of projects
+	projectTable := tview.NewTable()
+	projectTable.SetBorder(true)
+	projectTable.SetTitle("Projects")
+	projectTable.SetSelectable(true, false)
 
-// 	switch msg := msg.(type) {
-// 	case updateTable:
-// 		m.table = table.Model(msg)
-// 		m.table = m.table.WithTargetWidth(m.statusBar.Width)
+	projectTableImpl := jira.NewJiraProjectListTableImpl(jiraData.GetProjects())
+	projectTable.SetContent(projectTableImpl)
+	pages.AddPage(PageProject, projectTable, true, true)
 
-// 	case updateViewState:
-// 		m.viewState = string(msg)
-// 		serializedBreadcrumbs := []string{}
-// 		for _, breadcrumb := range m.breadcrumbs {
-// 			serializedBreadcrumbs = append(serializedBreadcrumbs, fmt.Sprintf("%s (%s)", breadcrumb.value, breadcrumb.t))
-// 		}
-// 		m.statusBar.SetContent(
-// 			m.viewState,
-// 			strings.Join(serializedBreadcrumbs, " > "),
-// 			m.jiraData.user.DisplayName,
-// 			m.jiraData.client.GetBaseURL().Host,
-// 		)
+	// selecting a project will show you the issues in that project
+	projectTable.SetSelectedFunc(func(row, column int) {
+		// retrieve the stored project ref
+		ref := projectTable.GetCell(row, column).GetReference()
+		// ensure it _is_ a project
+		if project, ok := ref.(gojira.Project); ok {
+			// fetch issues and update table content
+			slog.Debug("selected project", "project", project.Key)
 
-// 	case updateViewport:
-// 		m.viewport = viewport.New(m.globalWidth, m.globalHeight)
-// 		content := string(msg)
-// 		m.viewport.SetContent(content)
+			// the issues table has the list of issues in that project
+			issueTable := tview.NewTable()
+			issueTable.SetBorder(true)
+			issueTable.SetTitle(fmt.Sprintf("Issues in %s", project.Name))
+			issueTable.SetSelectable(true, false)
 
-// 	case tea.WindowSizeMsg:
-// 		m.globalHeight = msg.Height
-// 		m.statusBar.SetSize(msg.Width)
-// 		m.table = m.table.WithTargetWidth(msg.Width)
-// 		return m, nil
+			issueTableImpl := jira.NewJiraIssueListTableImpl(
+				jiraData.GetIssuesForProject(project),
+			)
+			issueTable.SetContent(issueTableImpl)
+			// and then switch to it
+			pages.AddAndSwitchToPage(PageIssues, issueTable, true)
+			pages.SwitchToPage(PageIssues)
+			app.SetFocus(issueTable)
 
-// 	case tea.KeyMsg:
-// 		switch {
+			// hitting esc on the issues table should send you back to the projects
+			issueTable.SetDoneFunc(func(key tcell.Key) {
+				pages.RemovePage(PageIssues)
+				app.SetFocus(projectTable)
+			})
 
-// 		case key.Matches(msg, keymap.DefaultKeyMap.Quit):
-// 			return m, tea.Quit
+			// selecting an issue shows issue details
+			issueTable.SetSelectedFunc(func(row, column int) {
+				issueRef := issueTable.GetCell(row, column).GetReference()
+				if issue, ok := issueRef.(gojira.Issue); ok {
+					// fully hydrate the issue
+					issue = jiraData.GetIssue(issue)
+					// then render it
+					issueFlex := generateIssueFlex(issue, jiraData)
 
-// 		case key.Matches(msg, keymap.DefaultKeyMap.Enter):
-// 			switch m.viewState {
-// 			case keywordBoards: // going to sprints
-// 				row := m.table.HighlightedRow()
-// 				if row.Data != nil {
-// 					m.breadcrumbs = append(m.breadcrumbs, breadcrumb{
-// 						t:     keywordBoards,
-// 						value: fmt.Sprint(row.Data[columnKeyID].(int)),
-// 					})
-// 					return m, getActiveSprintsInBoard(m.jiraData.client, row.Data[columnKeyID].(int))
-// 				}
-// 			case keywordSprints: // going to issues
-// 				row := m.table.HighlightedRow()
-// 				if row.Data != nil {
-// 					m.breadcrumbs = append(m.breadcrumbs, breadcrumb{
-// 						t:     keywordSprints,
-// 						value: fmt.Sprint(row.Data[columnKeyID].(int)),
-// 					})
-// 					return m, getIssuesInSprint(m.jiraData.client, row.Data[columnKeyID].(int))
-// 				}
-// 			case keywordIssues: // reading a single issue
-// 				row := m.table.HighlightedRow()
-// 				if row.Data != nil {
-// 					m.breadcrumbs = append(m.breadcrumbs, breadcrumb{
-// 						t:     keywordIssues,
-// 						value: fmt.Sprint(row.Data[columnKeyID]),
-// 					})
-// 					return m, getIssue(m.jiraData.client, row.Data[columnKeyID].(string), row.Data[columnKeyIssueKey].(string))
-// 				}
-// 			default:
-// 				panic(m.viewState)
-// 			}
-// 		case key.Matches(msg, keymap.DefaultKeyMap.Back):
-// 			// no breadcrumbs, nothing to esc here
-// 			if len(m.breadcrumbs) == 0 {
-// 				return m, nil
-// 			}
-// 			// going back. pop the last, because it's where we're at
-// 			m.breadcrumbs = m.breadcrumbs[:len(m.breadcrumbs)-1]
-// 			// if we have nothing left, we should render all boards
-// 			if len(m.breadcrumbs) == 0 {
-// 				return m, getBoards(m.jiraData.client)
-// 			}
-// 			// otherwise, we can go back some more. what's the new last value?
-// 			last := m.breadcrumbs[len(m.breadcrumbs)-1]
-// 			switch last.t {
-// 			case keywordIssues:
-// 				return m, getIssue(m.jiraData.client, last.value, last.value)
-// 			case keywordSprints:
-// 				i, err := strconv.Atoi(last.value)
-// 				if err != nil {
-// 					panic(err)
-// 				}
-// 				return m, getIssuesInSprint(m.jiraData.client, i)
-// 			case keywordBoards:
-// 				i, err := strconv.Atoi(last.value)
-// 				if err != nil {
-// 					panic(err)
-// 				}
-// 				return m, getActiveSprintsInBoard(m.jiraData.client, i)
-// 			}
-// 		}
-// 	default:
-// 		tea.Println(msg)
-// 	}
+					// if there's actually anything to update, add it to the page list + show
+					pages.AddAndSwitchToPage(PageSingleIssue, issueFlex, true)
+					app.SetFocus(issueFlex)
 
-// 	// likely to always have updates
-// 	m.statusBar, cmd = m.statusBar.Update(msg)
-// 	cmds = append(cmds, cmd)
-// 	m.viewport, cmd = m.viewport.Update(msg)
-// 	cmds = append(cmds, cmd)
+					issueFlex.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+						// handle esc to go back to issue list
+						switch event.Key() {
+						case tcell.KeyEsc, tcell.KeyCancel:
+							pages.RemovePage(PageSingleIssue)
+							app.SetFocus(issueTable)
+							return nil
+						}
+						return event
+					})
+				}
+			})
 
-// 	return m, tea.Batch(cmds...)
-// }
+		} else {
+			slog.Error(
+				"Selection didn't contain a project?", "row", row, "column", column,
+			)
+		}
+	})
 
-// func (m model) View() string {
-// 	strings := []string{
-// 		m.viewState,
-// 	}
+	// the frame has a footer telling us who we are and what instance we're
+	// operating on
+	frame := tview.NewFrame(pages)
 
-// 	// body is either a viewport of issue stuff or a table
-// 	body := ""
-// 	switch m.viewState {
-// 	case keywordBoards, keywordSprints, keywordIssues:
-// 		body = m.table.View()
-// 	default:
-// 		body = m.viewport.View()
-// 	}
-// 	// render the body
-// 	strings = append(
-// 		strings,
-// 		lipgloss.NewStyle().
-// 			Height(m.globalHeight-statusbar.Height).
-// 			MaxHeight(m.globalHeight-m.statusBar.Height).
-// 			Render(body),
-// 	)
-// 	// and then the status bar goes at the bottom
-// 	strings = append(strings, m.statusBar.View())
+	// version
+	var version string
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		version = bi.Main.Version
+	} else {
+		version = "(devel)"
+	}
+	frame.AddText(
+		fmt.Sprintf("go-jira-tui %s", version),
+		false,
+		tview.AlignLeft,
+		tview.Styles.TertiaryTextColor,
+	)
 
-// 	return lipgloss.JoinVertical(
-// 		lipgloss.Top,
-// 		strings...,
-// 	)
-// }
+	// user @ jira instance
+	frame.AddText(
+		fmt.Sprintf("%s @ %s", jiraData.User.DisplayName, jiraData.URL),
+		false,
+		tview.AlignRight,
+		tview.Styles.TertiaryTextColor,
+	)
+
+	app.SetRoot(frame, true)
+	app.SetFocus(pages)
+
+	return app
+}
 
 func main() {
 	// handle config
@@ -399,19 +310,33 @@ func main() {
 	// generate client
 	jiraData := jira.NewJiraData(config.Email, config.Token, config.Url)
 
-	// create the bubble tea model
-	m := model.NewModel(jiraData, config.AccentColor)
-
 	// setup logging
-	f, err := tea.LogToFileWith("go-jira-tui.debug.log", "prefix", logger.NewStructuredBubbleTeaLogger(config.LogFormat))
+	f, err := os.OpenFile(
+		"go-jira-tui.debug.log",
+		os.O_WRONLY|os.O_TRUNC|os.O_CREATE|os.O_APPEND,
+		0644,
+	)
 	if err != nil {
 		panic(err)
 	}
 	defer f.Close()
-	slog.Debug("started logger")
-	// run the UI
-	if _, err := tea.NewProgram(m, tea.WithAltScreen()).Run(); err != nil {
-		fmt.Println("Error running program:", err)
-		os.Exit(1)
+	slog.SetDefault(
+		slog.New(
+			slog.NewTextHandler(
+				f,
+				&slog.HandlerOptions{
+					AddSource: true,
+					Level:     slog.LevelDebug,
+				},
+			),
+		),
+	)
+
+	// setup + run app
+	app := setupApp(jiraData)
+	app.EnableMouse(true)
+
+	if err := app.Run(); err != nil {
+		panic(err)
 	}
 }
